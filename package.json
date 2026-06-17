@@ -1,0 +1,48 @@
+{
+  "name": "figma-token-sync",
+  "version": "0.1.0",
+  "description": "Sync Figma Variables → design tokens (Style Dictionary / CSS) + drift detection. TypeScript CLI.",
+  "type": "module",
+  "bin": {
+    "figma-token-sync": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "figma",
+    "design-tokens",
+    "style-dictionary",
+    "design-system",
+    "css-variables",
+    "drift",
+    "cli"
+  ],
+  "author": "Dave Mooney",
+  "license": "MIT",
+  "homepage": "https://github.com/davemooney/figma-token-sync#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/davemooney/figma-token-sync.git"
+  },
+  "bugs": {
+    "url": "https://github.com/davemooney/figma-token-sync/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.0"
+  }
+}

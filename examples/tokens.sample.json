@@ -1,0 +1,37 @@
+{
+  "color": {
+    "brand": {
+      "primary": { "value": "#4f46e5", "type": "color" },
+      "secondary": { "value": "#0ea5e9", "type": "color" }
+    },
+    "text": {
+      "default": { "value": "#111827", "type": "color" },
+      "muted": { "value": "#6b7280", "type": "color" }
+    },
+    "surface": {
+      "base": { "value": "#ffffff", "type": "color" },
+      "raised": { "value": "#f9fafb", "type": "color" }
+    }
+  },
+  "space": {
+    "xs": { "value": 4, "type": "dimension" },
+    "sm": { "value": 8, "type": "dimension" },
+    "md": { "value": 16, "type": "dimension" },
+    "lg": { "value": 24, "type": "dimension" },
+    "xl": { "value": 40, "type": "dimension" }
+  },
+  "radius": {
+    "sm": { "value": 4, "type": "dimension" },
+    "md": { "value": 8, "type": "dimension" },
+    "pill": { "value": 999, "type": "dimension" }
+  },
+  "font": {
+    "family": {
+      "sans": { "value": "Inter, system-ui, sans-serif", "type": "string" }
+    },
+    "size": {
+      "body": { "value": 16, "type": "dimension" },
+      "heading": { "value": 28, "type": "dimension" }
+    }
+  }
+}
