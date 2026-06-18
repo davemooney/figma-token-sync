@@ -132,8 +132,40 @@ HTML page with:
 - a **per-file drill-down** with per-page adoption.
 
 See the committed sample: [`examples/sample-audit-report.html`](./examples/sample-audit-report.html)
-(7 files, 39.9% adoption, 205 findings — generated from fixtures via
-`npm run sample-report`, no token needed).
+(7 files, 36.2% adoption, 205 findings, 24 frame thumbnails — generated from
+fixtures via `npm run sample-report`, no token needed).
+
+### Frame thumbnails (`--thumbnails`)
+
+```bash
+figma-token-sync audit --files file-keys.txt --thumbnails \
+  --thumb-format svg --thumb-scale 1 --thumb-max 200 --out report.html
+```
+
+With `--thumbnails`, each **flagged frame** is rendered once via Figma's
+**`GET /v1/images/:key?ids=:frameId&format=svg`** API and the flagged nodes are
+outlined *in place*, surfaced two ways:
+
+- **Frame gallery** — a ~4-col card grid. Each card shows the rendered frame
+  with overlay rects (green = component instance, solid red = raw / unbound
+  node, dashed amber = ad-hoc text, dashed amber box = detached candidate), an
+  **adoption ring** (frame-level %), a severity **badge**, the frame name +
+  file·page, a compact flag breakdown, and a legend.
+- **Inline preview column** — a leading ≈96×60 thumbnail in the findings table,
+  the offending node outlined inside its parent frame; **hover enlarges** it.
+
+**Sourcing & self-containment.** `/v1/images` returns time-boxed **S3 URLs**, so
+we fetch the bytes *promptly* and **inline** them (SVG as markup, PNG as a
+`data:` URI) — the report stays a single self-contained HTML file with **no
+external `<img src>` / `<script src>`** beyond the existing webfont `<link>`.
+Bytes (not URLs) are cached under `.figma-audit-cache`, keyed by
+`(fileKey, version, frameId, format, scale)`. Findings are deduped to their
+nearest FRAME/COMPONENT ancestor so each frame is imaged **once** (not per
+leaf), fetches are concurrency-bounded, and `--thumb-max` caps the count.
+Coordinate space: `/v1/images` renders the frame at its own bounds, so each
+flagged child's rect is normalised to `(childBox − frameOrigin) × scale` and
+clamped to the frame (unit-tested — it's the one fiddly bit). `--thumbnails` off
+yields the byte-identical text-only report.
 
 ### Flags
 
@@ -151,7 +183,10 @@ See the committed sample: [`examples/sample-audit-report.html`](./examples/sampl
 | `--no-cache` | — | disable the version cache |
 | `--fail-under <pct>` | — | **CI gate** — exit non-zero if portfolio adoption % is below this |
 | `--max-unbound <n>` | — | **CI gate** — exit non-zero if unbound-value findings exceed this |
-| `--thumbnails` | *(stub)* | embed frame visuals via `GET /v1/images` — **not yet implemented**; flagged for a follow-up |
+| `--thumbnails` | off | image each **flagged frame** via `GET /v1/images`, inline it, and render the **gallery** + **inline-preview** surfaces (see below) |
+| `--thumb-format <svg\|png>` | `svg` | thumbnail render format (SVG stays vector + tiny; PNG fallback for export-resistant frames) |
+| `--thumb-scale <n>` | `1` | pixel scale passed to `/v1/images` (1–4) |
+| `--thumb-max <n>` | — | cap how many flagged frames are imaged (logged when truncated — `/v1/images` is rate-limited) |
 
 The fetch layer is concurrency-capped, backs off exponentially on `429`/`5xx`
 (honouring `Retry-After`), and caches each file's payload keyed by its Figma
