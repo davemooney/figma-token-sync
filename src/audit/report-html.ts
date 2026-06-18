@@ -14,7 +14,20 @@
  * table stays responsive with thousands of rows across hundreds of files.
  */
 
-import type { AuditResult, RuleId, Severity } from "./types.js";
+import type {
+  AuditResult,
+  BoundingBox,
+  FrameThumbnail,
+  RuleId,
+  Severity,
+  ThumbnailOverlay,
+} from "./types.js";
+
+export interface HtmlReportOptions {
+  /** When true and `result.frameThumbnails` is populated, render the gallery +
+   * inline-preview surfaces. OFF (default) → byte-identical to the text report. */
+  thumbnails?: boolean;
+}
 
 const RULE_LABELS: Record<RuleId, string> = {
   adoption: "Adoption",
@@ -46,6 +59,152 @@ function scoreColor(pct: number): string {
   if (pct >= 80) return "var(--ok)";
   if (pct >= 50) return "var(--warn)";
   return "var(--bad)";
+}
+
+/**
+ * Outline style per finding type (issue #3 legend):
+ *   green       = component instance (local-component / duplicate-component)
+ *   solid red   = raw node (unbound-value)
+ *   dashed amber= unbound value / ad-hoc text
+ *   dashed amber box = detached candidate
+ */
+interface OverlayStyle {
+  stroke: string;
+  dash: boolean;
+  label: string;
+}
+function overlayStyle(rule: RuleId): OverlayStyle {
+  switch (rule) {
+    case "local-component":
+    case "duplicate-component":
+      return { stroke: "var(--ok)", dash: false, label: "instance / dup component" };
+    case "unbound-value":
+      return { stroke: "var(--bad)", dash: false, label: "raw / unbound node" };
+    case "adhoc-text":
+      return { stroke: "var(--warn)", dash: true, label: "ad-hoc text" };
+    case "detached-candidate":
+      return { stroke: "var(--warn)", dash: true, label: "detached candidate" };
+    default:
+      return { stroke: "var(--accent)", dash: true, label: "flag" };
+  }
+}
+
+/** Key a thumbnail / overlay by file + frame. */
+function frameKey(fileKey: string, frameId: string): string {
+  return `${fileKey}::${frameId}`;
+}
+
+/**
+ * Render one inlined frame thumbnail as a self-contained <svg> with the export
+ * image as a layer and the flagged-node rects overlaid on top. `viewBox` is the
+ * frame's pixel space (frameBox dims × scale) so the overlay rects — already in
+ * that space from `normalizeRect` — land correctly regardless of display size.
+ */
+function renderThumbSvg(
+  thumb: FrameThumbnail,
+  overlays: ThumbnailOverlay[],
+  opts: { class?: string } = {},
+): string {
+  const vw = Math.max(1, Math.round(thumb.frameBox.width * thumb.scale));
+  const vh = Math.max(1, Math.round(thumb.frameBox.height * thumb.scale));
+
+  let imageLayer: string;
+  if (thumb.image.kind === "svg") {
+    // Embed the export's SVG markup via a data URI <image> so its own coordinate
+    // system can't collide with our overlay viewBox.
+    const b64 = Buffer.from(thumb.image.markup, "utf8").toString("base64");
+    imageLayer = `<image href="data:image/svg+xml;base64,${b64}" x="0" y="0" width="${vw}" height="${vh}" preserveAspectRatio="xMidYMid meet"/>`;
+  } else {
+    imageLayer = `<image href="${thumb.image.dataUri}" x="0" y="0" width="${vw}" height="${vh}" preserveAspectRatio="xMidYMid meet"/>`;
+  }
+
+  const rects = overlays
+    .map((o) => {
+      const st = overlayStyle(o.rule);
+      const r: BoundingBox = o.rect;
+      const dash = st.dash ? ` stroke-dasharray="6 4"` : "";
+      const sw = Math.max(1.5, Math.round(Math.max(vw, vh) / 220));
+      return `<rect x="${r.x}" y="${r.y}" width="${r.width}" height="${r.height}" fill="none" stroke="${st.stroke}" stroke-width="${sw}"${dash}><title>${esc(
+        o.rule,
+      )}: ${esc(o.message)}</title></rect>`;
+    })
+    .join("");
+
+  const cls = opts.class ? ` class="${opts.class}"` : "";
+  return `<svg${cls} viewBox="0 0 ${vw} ${vh}" preserveAspectRatio="xMidYMid meet" xmlns="http://www.w3.org/2000/svg">${imageLayer}${rects}</svg>`;
+}
+
+/** An adoption ring (SVG donut) for a gallery card. */
+function renderRing(pct: number): string {
+  const r = 18;
+  const c = 2 * Math.PI * r;
+  const off = c * (1 - Math.min(100, Math.max(0, pct)) / 100);
+  return `<svg class="ring" viewBox="0 0 44 44" width="44" height="44">
+    <circle cx="22" cy="22" r="${r}" fill="none" stroke="var(--panel-2)" stroke-width="4"/>
+    <circle cx="22" cy="22" r="${r}" fill="none" stroke="${scoreColor(
+      pct,
+    )}" stroke-width="4" stroke-linecap="round"
+      stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(
+        1,
+      )}" transform="rotate(-90 22 22)"/>
+    <text x="22" y="22" text-anchor="middle" dominant-baseline="central"
+      font-family="var(--mono)" font-size="10" fill="var(--ink)">${Math.round(
+        pct,
+      )}%</text>
+  </svg>`;
+}
+
+const GALLERY_LEGEND = [
+  { stroke: "var(--ok)", dash: false, label: "instance / dup component" },
+  { stroke: "var(--bad)", dash: false, label: "raw / unbound node" },
+  { stroke: "var(--warn)", dash: true, label: "ad-hoc text" },
+  { stroke: "var(--warn)", dash: true, label: "detached candidate" },
+];
+
+function renderGallery(thumbs: FrameThumbnail[]): string {
+  if (thumbs.length === 0) {
+    return '<div class="empty">No flagged frames to image.</div>';
+  }
+  const legend = GALLERY_LEGEND.map(
+    (l) =>
+      `<span class="lg"><span class="swatch" style="border-color:${l.stroke};border-style:${
+        l.dash ? "dashed" : "solid"
+      }"></span>${esc(l.label)}</span>`,
+  ).join("");
+
+  const cards = thumbs
+    .map((t) => {
+      const flags = (Object.entries(t.flagCounts) as [RuleId, number][])
+        .filter(([, n]) => n > 0)
+        .map(([rule, n]) => `${n} ${esc(RULE_LABELS[rule].toLowerCase())}`)
+        .join(" · ");
+      const badge =
+        t.adoptionPct < 50
+          ? `<span class="gbadge bad">${Math.round(t.adoptionPct)}% adopted</span>`
+          : t.adoptionPct < 80
+            ? `<span class="gbadge warn">${Math.round(t.adoptionPct)}% adopted</span>`
+            : `<span class="gbadge ok">${Math.round(t.adoptionPct)}% adopted</span>`;
+      const detached = (t.flagCounts["detached-candidate"] ?? 0) > 0
+        ? `<span class="gbadge warn">detached?</span>`
+        : "";
+      return `<figure class="gcard">
+        <div class="gthumb">${renderThumbSvg(t, t.overlays, { class: "tsvg" })}</div>
+        <figcaption>
+          <div class="grow">
+            ${renderRing(t.adoptionPct)}
+            <div class="gmeta">
+              <div class="gname">${esc(t.frameName)}</div>
+              <div class="gfile">${esc(t.fileName)} · ${esc(t.page)}</div>
+            </div>
+          </div>
+          <div class="gbadges">${badge}${detached}</div>
+          <div class="gflags">${flags || "no flags"}</div>
+        </figcaption>
+      </figure>`;
+    })
+    .join("");
+
+  return `<div class="legend">${legend}</div><div class="gallery">${cards}</div>`;
 }
 
 const STYLE = `
@@ -124,9 +283,51 @@ details.file .body{padding:0 18px 16px;border-top:1px solid var(--line)}
 footer{margin-top:48px;padding-top:20px;border-top:1px solid var(--line);color:var(--faint);
   font-family:var(--mono);font-size:11px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
 .mini{font-variant-numeric:tabular-nums}
+/* --- thumbnails: gallery --- */
+.legend{display:flex;gap:18px;flex-wrap:wrap;margin-bottom:16px;font-family:var(--mono);font-size:11px;color:var(--muted)}
+.legend .lg{display:flex;align-items:center;gap:7px}
+.legend .swatch{display:inline-block;width:16px;height:11px;border:2px solid var(--line);border-radius:3px}
+.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:16px}
+.gcard{margin:0;background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;display:flex;flex-direction:column}
+.gthumb{aspect-ratio:4/3;background:var(--panel-2);display:flex;align-items:center;justify-content:center;overflow:hidden;border-bottom:1px solid var(--line)}
+.gthumb .tsvg{width:100%;height:100%;display:block}
+.gcard figcaption{padding:12px 14px;display:flex;flex-direction:column;gap:8px}
+.grow{display:flex;align-items:center;gap:12px}
+.ring{flex:0 0 auto}
+.ring text{font-family:var(--mono)}
+.gmeta{min-width:0}
+.gname{font-weight:600;font-size:13px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gfile{font-family:var(--mono);font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.gbadges{display:flex;gap:6px;flex-wrap:wrap}
+.gbadge{font-family:var(--mono);font-size:9px;text-transform:uppercase;letter-spacing:.05em;padding:3px 7px;border-radius:6px}
+.gbadge.ok{background:rgba(51,225,196,.12);color:var(--ok)}
+.gbadge.warn{background:rgba(255,204,102,.12);color:var(--warn)}
+.gbadge.bad{background:rgba(255,107,129,.12);color:var(--bad)}
+.gflags{font-family:var(--mono);font-size:11px;color:var(--faint)}
+/* --- thumbnails: inline preview cell --- */
+td.preview{width:108px;padding:8px 12px}
+.ipv{width:96px;height:60px;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--panel-2);
+  display:block;cursor:zoom-in;transition:transform .12s ease,box-shadow .12s ease;position:relative;z-index:1}
+.ipv svg{width:100%;height:100%;display:block}
+.ipv:hover{transform:scale(3.4);transform-origin:left center;box-shadow:0 12px 40px rgba(0,0,0,.6);z-index:20;border-color:var(--accent)}
+.ipv.none{display:flex;align-items:center;justify-content:center;color:var(--faint);font-family:var(--mono);font-size:9px;cursor:default}
+.ipv.none:hover{transform:none;box-shadow:none}
 `;
 
-export function renderHtmlReport(result: AuditResult): string {
+export function renderHtmlReport(
+  result: AuditResult,
+  opts: HtmlReportOptions = {},
+): string {
+  const thumbsOn =
+    !!opts.thumbnails &&
+    Array.isArray(result.frameThumbnails) &&
+    result.frameThumbnails.length > 0;
+  const thumbs = thumbsOn ? result.frameThumbnails! : [];
+
+  // Index thumbnails by file+frame for inline-preview lookup.
+  const thumbByFrame = new Map<string, FrameThumbnail>();
+  for (const t of thumbs) thumbByFrame.set(frameKey(t.fileKey, t.frameId), t);
+
   const adoptionPct = result.adoptionPct;
   const topFiles = [...result.files]
     .filter((f) => !f.error)
@@ -185,22 +386,44 @@ export function renderHtmlReport(result: AuditResult): string {
     })
     .join("");
 
-  // Findings embedded for the client-side table.
+  // Findings embedded for the client-side table. When thumbnails are on, each
+  // finding carries a small inline-preview SVG (its parent frame with just this
+  // node outlined) — self-contained, no external src.
   const findingsJson = JSON.stringify(
-    result.findings.map((f) => ({
-      file: f.fileName,
-      page: f.page,
-      path: f.nodePath,
-      rule: f.rule,
-      ruleLabel: RULE_LABELS[f.rule],
-      severity: f.severity,
-      message: f.message,
-      link: f.figmaDeepLink,
-    })),
+    result.findings.map((f) => {
+      let preview = "";
+      if (thumbsOn && f.frameId && f.nodeBox) {
+        const t = thumbByFrame.get(frameKey(f.fileKey, f.frameId));
+        if (t) {
+          const overlay = t.overlays.find((o) => o.nodeId === f.nodeId);
+          if (overlay) preview = renderThumbSvg(t, [overlay], { class: "ipv-svg" });
+        }
+      }
+      return {
+        file: f.fileName,
+        page: f.page,
+        path: f.nodePath,
+        rule: f.rule,
+        ruleLabel: RULE_LABELS[f.rule],
+        severity: f.severity,
+        message: f.message,
+        link: f.figmaDeepLink,
+        ...(thumbsOn ? { preview } : {}),
+      };
+    }),
   );
 
   const totalFindings = result.findings.length;
   const sevCount = (s: Severity) => result.countsBySeverity[s] ?? 0;
+
+  const gallerySection = thumbsOn
+    ? `<section>
+  <h2>Flagged-frame gallery <span class="pill">${thumbs.length} frame${
+        thumbs.length === 1 ? "" : "s"
+      } imaged · /v1/images</span></h2>
+  ${renderGallery(thumbs)}
+</section>`
+    : "";
 
   return `<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
@@ -256,6 +479,8 @@ the Figma REST API has no <code>wasInstance</code> flag, so these are <b>candida
   ${topFileRows || '<div class="empty">No findings 🎉</div>'}
 </section>
 
+${gallerySection}
+
 <section>
   <h2>Findings <span class="pill" id="resultCount"></span></h2>
   <div class="controls">
@@ -269,6 +494,7 @@ the Figma REST API has no <code>wasInstance</code> flag, so these are <b>candida
   </div>
   <table id="tbl">
     <thead><tr>
+      ${thumbsOn ? "<th>Preview</th>" : ""}
       <th data-k="severity">Sev<span class="arr">↕</span></th>
       <th data-k="ruleLabel">Rule<span class="arr">↕</span></th>
       <th data-k="file">File<span class="arr">↕</span></th>
@@ -298,6 +524,8 @@ the Figma REST API has no <code>wasInstance</code> flag, so these are <b>candida
 
 <script>
 const FINDINGS = ${findingsJson};
+const THUMBS_ON = ${thumbsOn ? "true" : "false"};
+const COLSPAN = THUMBS_ON ? 8 : 7;
 const PAGE_SIZE = 50;
 let sortKey = 'severity', sortDir = 1, page = 0;
 const SEV_ORDER = {error:0, warning:1, info:2};
@@ -335,10 +563,12 @@ function render(){
   if(page>=pages) page=pages-1; if(page<0) page=0;
   const slice = rows.slice(page*PAGE_SIZE,(page+1)*PAGE_SIZE);
   document.getElementById('resultCount').textContent = total + ' result' + (total===1?'':'s');
-  if(slice.length===0){tbody.innerHTML='<tr><td colspan="7" class="empty">No matching findings.</td></tr>';}
+  if(slice.length===0){tbody.innerHTML='<tr><td colspan="'+COLSPAN+'" class="empty">No matching findings.</td></tr>';}
   else{
     tbody.innerHTML = slice.map(f=>
-      '<tr><td><span class="sev '+f.severity+'"></span>'+f.severity+'</td>'+
+      '<tr>'+
+      (THUMBS_ON ? '<td class="preview">'+(f.preview ? '<span class="ipv">'+f.preview+'</span>' : '<span class="ipv none">no box</span>')+'</td>' : '')+
+      '<td><span class="sev '+f.severity+'"></span>'+f.severity+'</td>'+
       '<td><span class="rulebadge">'+esc(f.ruleLabel)+'</span></td>'+
       '<td>'+esc(f.file)+'</td><td>'+esc(f.page)+'</td>'+
       '<td class="path">'+esc(f.path)+'</td><td class="msg">'+esc(f.message)+'</td>'+

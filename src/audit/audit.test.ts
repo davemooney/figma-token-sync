@@ -25,13 +25,20 @@ import {
 } from "./rules.js";
 import { renderHtmlReport } from "./report-html.js";
 import { renderJsonReport } from "./report-json.js";
-import type { FigmaFileResponse, PublishedComponent, FigmaNode } from "./types.js";
+import { normalizeRect, buildFrameThumbnails } from "./thumbnails.js";
+import { FigmaClient } from "../figma-client.js";
+import type {
+  FigmaFileResponse,
+  PublishedComponent,
+  FigmaNode,
+} from "./types.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fx = (name: string) =>
   JSON.parse(readFileSync(join(here, "__fixtures__", name), "utf8"));
 
 const sampleFile = fx("sample-file.json") as FigmaFileResponse;
+const boxesFile = fx("frame-with-boxes.json") as FigmaFileResponse;
 const components = fx("components.json") as PublishedComponent[];
 const library = indexFromComponents(components);
 
@@ -203,4 +210,179 @@ test("JSON report round-trips the result", () => {
   assert.equal(parsed.fileCount, 1);
   assert.equal(parsed.adoptionPct, 22.2);
   assert.ok(Array.isArray(parsed.findings));
+});
+
+// --- thumbnails (#3) ---------------------------------------------------------
+
+test("normalizeRect: child rect is frame-relative, scaled", () => {
+  const frame = { x: 100, y: 200, width: 400, height: 300 };
+  const node = { x: 120, y: 220, width: 200, height: 100 };
+  // scale 1: (120-100, 220-200) = (20,20), size unchanged.
+  assert.deepEqual(normalizeRect(node, frame, 1), {
+    x: 20,
+    y: 20,
+    width: 200,
+    height: 100,
+  });
+  // scale 2 doubles origin + size.
+  assert.deepEqual(normalizeRect(node, frame, 2), {
+    x: 40,
+    y: 40,
+    width: 400,
+    height: 200,
+  });
+});
+
+test("normalizeRect: clamps an overflowing child into the frame", () => {
+  const frame = { x: 0, y: 0, width: 100, height: 100 };
+  const node = { x: 80, y: 80, width: 200, height: 200 };
+  const r = normalizeRect(node, frame, 1);
+  assert.equal(r.x, 80);
+  assert.equal(r.y, 80);
+  assert.equal(r.width, 20); // clamped to remaining room (100-80)
+  assert.equal(r.height, 20);
+});
+
+test("normalizeRect: scale<=0 falls back to 1", () => {
+  const frame = { x: 0, y: 0, width: 100, height: 100 };
+  const node = { x: 10, y: 10, width: 20, height: 20 };
+  assert.deepEqual(normalizeRect(node, frame, 0), {
+    x: 10,
+    y: 10,
+    width: 20,
+    height: 20,
+  });
+});
+
+/** A FigmaClient whose getJSON is stubbed to return an /v1/images response. */
+function mockImagesClient(urlByFrame: Record<string, string>): FigmaClient {
+  const client = new FigmaClient({ token: "fake", fetchImpl: (async () =>
+    new Response("{}")) as unknown as typeof fetch });
+  // Override the rate-limited getJSON to answer /images/:key?ids=:frameId.
+  (client as unknown as { getJSON: (p: string) => Promise<unknown> }).getJSON =
+    async (path: string) => {
+      const m = path.match(/ids=([^&]+)/);
+      const id = m ? decodeURIComponent(m[1]) : "";
+      return { images: { [id]: urlByFrame[id] ?? null } };
+    };
+  return client;
+}
+
+const SVG_BYTES = '<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>';
+function svgFetch(): typeof fetch {
+  return (async () =>
+    new Response(SVG_BYTES, {
+      status: 200,
+      headers: { "content-type": "image/svg+xml" },
+    })) as unknown as typeof fetch;
+}
+
+test("buildFrameThumbnails groups findings by frame and inlines bytes", async () => {
+  const result = analyzeFiles([{ fileKey: "k1", file: boxesFile }], library);
+  // Findings should carry frameId/frameBox/nodeBox from the box fixture.
+  const withFrame = result.findings.filter((f) => f.frameId && f.nodeBox);
+  assert.ok(withFrame.length >= 2, "fixture yields multiple boxed findings");
+
+  const client = mockImagesClient({ "1:1": "https://s3.example/hero.svg" });
+  const thumbs = await buildFrameThumbnails(client, result.findings, {
+    format: "svg",
+    scale: 1,
+    noCache: true,
+    fetchImpl: svgFetch(),
+  });
+  assert.equal(thumbs.length, 1, "one unique frame imaged");
+  const t = thumbs[0];
+  assert.equal(t.frameId, "1:1");
+  assert.equal(t.image.kind, "svg");
+  assert.ok(t.overlays.length >= 2, "all frame findings overlaid");
+  // overlay rect is frame-relative: Hardcoded BG at (120,220) in frame (100,200)
+  const bg = t.overlays.find((o) => o.nodeId === "1:2");
+  assert.ok(bg);
+  assert.deepEqual(bg!.rect, { x: 20, y: 20, width: 200, height: 100 });
+});
+
+test("--thumb-max truncates the imaged frame set (logged)", async () => {
+  // Two distinct frames across two files.
+  const f2: FigmaFileResponse = JSON.parse(JSON.stringify(boxesFile));
+  const result = analyzeFiles(
+    [
+      { fileKey: "k1", file: boxesFile },
+      { fileKey: "k2", file: f2 },
+    ],
+    library,
+  );
+  const logs: string[] = [];
+  const client = mockImagesClient({ "1:1": "https://s3.example/hero.svg" });
+  const thumbs = await buildFrameThumbnails(client, result.findings, {
+    format: "svg",
+    scale: 1,
+    max: 1,
+    noCache: true,
+    fetchImpl: svgFetch(),
+    log: (m) => logs.push(m),
+  });
+  assert.equal(thumbs.length, 1, "capped to 1 frame");
+  assert.ok(
+    logs.some((l) => l.includes("--thumb-max")),
+    "truncation logged",
+  );
+});
+
+test("thumbnails OFF → report byte-identical to default", () => {
+  const result = analyzeFiles([{ fileKey: "k1", file: boxesFile }], library);
+  const a = renderHtmlReport(result);
+  const b = renderHtmlReport(result, { thumbnails: false });
+  assert.equal(a, b, "off-flag matches no-opts");
+  // Even with thumbnails embedded but the flag off, output is unchanged.
+  result.frameThumbnails = [];
+  const c = renderHtmlReport(result, { thumbnails: true });
+  assert.equal(a, c, "empty thumbnails → unchanged");
+  assert.ok(!a.includes("Flagged-frame gallery"));
+  assert.ok(!a.includes("<th>Preview</th>"), "no preview column header when off");
+  assert.ok(a.includes("const THUMBS_ON = false"), "client flag off");
+});
+
+test("thumbnails ON → gallery + inline previews are inlined (no external img src)", async () => {
+  const result = analyzeFiles([{ fileKey: "k1", file: boxesFile }], library);
+  const client = mockImagesClient({ "1:1": "https://s3.example/hero.svg" });
+  result.frameThumbnails = await buildFrameThumbnails(client, result.findings, {
+    format: "svg",
+    scale: 1,
+    noCache: true,
+    fetchImpl: svgFetch(),
+  });
+  const html = renderHtmlReport(result, { thumbnails: true });
+
+  assert.ok(html.includes("Flagged-frame gallery"), "gallery section present");
+  assert.ok(html.includes("<th>Preview</th>"), "inline preview column present");
+  assert.ok(html.includes('class="gallery"'));
+  // Self-containment: no external image/script src; the only http link is the webfont <link>.
+  assert.ok(!/<img\s+src=["']http/i.test(html), "no external <img src=http>");
+  assert.ok(!/<image[^>]+href=["']http/i.test(html), "no external svg <image href=http>");
+  assert.ok(!/<script\s+src=/i.test(html), "no external script src");
+  // The S3 url must NOT appear (we inlined the bytes, not the URL).
+  assert.ok(!html.includes("s3.example"), "S3 url not embedded");
+  // Inlined frame SVG present as a data URI image.
+  assert.ok(html.includes("data:image/svg+xml;base64,"), "frame svg inlined as data uri");
+});
+
+test("PNG thumbnails inline as a base64 data URI", async () => {
+  const result = analyzeFiles([{ fileKey: "k1", file: boxesFile }], library);
+  const client = mockImagesClient({ "1:1": "https://s3.example/hero.png" });
+  const pngFetch = (async () =>
+    new Response(new Uint8Array([137, 80, 78, 71]), {
+      status: 200,
+      headers: { "content-type": "image/png" },
+    })) as unknown as typeof fetch;
+  result.frameThumbnails = await buildFrameThumbnails(client, result.findings, {
+    format: "png",
+    scale: 2,
+    noCache: true,
+    fetchImpl: pngFetch,
+  });
+  assert.equal(result.frameThumbnails.length, 1);
+  assert.equal(result.frameThumbnails[0].image.kind, "png");
+  const html = renderHtmlReport(result, { thumbnails: true });
+  assert.ok(html.includes("data:image/png;base64,"), "png inlined as data uri");
+  assert.ok(!html.includes("s3.example"));
 });
