@@ -27,6 +27,7 @@ import { buildLibraryIndex, emptyIndex } from "./audit/library-index.js";
 import { analyzeFiles } from "./audit/analyze.js";
 import { renderHtmlReport } from "./audit/report-html.js";
 import { renderJsonReport, renderAuditConsole } from "./audit/report-json.js";
+import { buildFrameThumbnails } from "./audit/thumbnails.js";
 import type { AuditConfig } from "./audit/rules.js";
 
 interface CommonOpts {
@@ -152,6 +153,9 @@ interface AuditOpts {
   failUnder?: string;
   maxUnbound?: string;
   thumbnails?: boolean;
+  thumbFormat: "svg" | "png";
+  thumbScale: string;
+  thumbMax?: string;
 }
 
 async function readFileKeys(opts: AuditOpts, client: FigmaClient): Promise<string[]> {
@@ -191,7 +195,13 @@ program
   .option("--no-cache", "Disable the version-keyed response cache")
   .option("--fail-under <pct>", "Exit non-zero if portfolio adoption % is below this")
   .option("--max-unbound <n>", "Exit non-zero if unbound-value findings exceed this")
-  .option("--thumbnails", "(stub) embed frame thumbnails — not yet implemented")
+  .option(
+    "--thumbnails",
+    "image each flagged frame via GET /v1/images and embed inline (gallery + inline previews)",
+  )
+  .option("--thumb-format <fmt>", "thumbnail image format: svg | png", "svg")
+  .option("--thumb-scale <n>", "thumbnail render scale (1-4)", "1")
+  .option("--thumb-max <n>", "cap how many flagged frames are imaged (logged when truncated)")
   .action(async (opts: AuditOpts) => {
     const token = opts.token ?? process.env.FIGMA_TOKEN;
     if (!token) {
@@ -205,9 +215,14 @@ program
     if (opts.format !== "html" && opts.format !== "json") {
       throw new Error(`Unknown --format "${opts.format}" (use html | json).`);
     }
-    if (opts.thumbnails) {
+    if (opts.thumbnails && opts.format !== "html") {
       console.warn(
-        "⚠ --thumbnails is not yet implemented (stubbed); continuing without thumbnails.",
+        "⚠ --thumbnails only affects the HTML report; ignoring for --format json.",
+      );
+    }
+    if (opts.thumbFormat !== "svg" && opts.thumbFormat !== "png") {
+      throw new Error(
+        `Unknown --thumb-format "${opts.thumbFormat}" (use svg | png).`,
       );
     }
 
@@ -259,10 +274,48 @@ program
     const result = analyzeFiles(fetched, library, config);
     console.log(renderAuditConsole(result));
 
+    // --thumbnails: image only frames that HAVE findings (default), via
+    // /v1/images, inlined + cached. HTML report only.
+    if (opts.thumbnails && opts.format === "html") {
+      const fileVersions: Record<string, string> = {};
+      for (const f of fetched) {
+        if (f.file?.version) fileVersions[f.fileKey] = f.file.version;
+      }
+      const thumbScale = Number(opts.thumbScale) || 1;
+      const thumbMax =
+        opts.thumbMax !== undefined ? Number(opts.thumbMax) : undefined;
+      console.log(
+        `Imaging flagged frames via /v1/images (format=${opts.thumbFormat}, scale=${thumbScale}${
+          thumbMax !== undefined ? `, max=${thumbMax}` : ""
+        })…`,
+      );
+      result.frameThumbnails = await buildFrameThumbnails(
+        client,
+        result.findings,
+        {
+          format: opts.thumbFormat,
+          scale: thumbScale,
+          max: thumbMax,
+          concurrency: Number(opts.concurrency) || 4,
+          cacheDir: opts.cacheDir,
+          noCache: opts.noCache,
+          fileVersions,
+          log: (m) => console.warn(m),
+          onProgress: (done, total) => {
+            if (done === total || done % 10 === 0) {
+              process.stdout.write(`\r  imaged ${done}/${total}`);
+            }
+          },
+        },
+      );
+      process.stdout.write("\n");
+      console.log(`✓ Imaged ${result.frameThumbnails.length} flagged frame(s).`);
+    }
+
     const output =
       opts.format === "json"
         ? renderJsonReport(result)
-        : renderHtmlReport(result);
+        : renderHtmlReport(result, { thumbnails: !!opts.thumbnails });
     await writeFile(resolve(opts.out), output, "utf8");
     console.log(`✓ Wrote ${opts.format.toUpperCase()} report → ${opts.out}`);
 
