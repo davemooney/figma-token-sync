@@ -3,6 +3,21 @@
 All notable changes to this project are documented here. This project adheres
 to [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `audit` command — scan many Figma files via the live REST API for
+  component-adoption problems and emit a self-contained, SIGNAL-styled HTML
+  report (also `--format json`). Five signals: adoption % (instances vs. raw
+  geometry), unbound fills/strokes/effects, ad-hoc text, local-vs-library
+  component usage, and heuristic detached/duplicate-component **candidates**
+  (clearly labelled — REST has no `wasInstance` flag).
+- Published-component index (`/components` + `/component_sets`), cached.
+- Bulk fetcher: bounded concurrency, exponential backoff on `429`/`5xx`, and an
+  on-disk response cache keyed by file `version`.
+- CI gates: `--fail-under <adoption %>` and `--max-unbound <n>`.
+- `--thumbnails` flag is stubbed (documented) for a follow-up.
+
 ## [0.1.0] - 2026-06-15
 
 ### Added

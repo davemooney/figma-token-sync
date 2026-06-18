@@ -1,0 +1,5 @@
+[
+  { "key": "lib-button-key", "name": "Button", "node_id": "100:1" },
+  { "key": "lib-card-key", "name": "Card", "node_id": "100:2" },
+  { "key": "lib-input-key", "name": "Input / Text Field", "node_id": "100:3" }
+]
