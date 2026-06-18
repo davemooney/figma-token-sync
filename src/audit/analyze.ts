@@ -14,6 +14,7 @@
 import {
   deepLink,
   type AuditResult,
+  type BoundingBox,
   type FigmaFileResponse,
   type FigmaNode,
   type FileReport,
@@ -40,6 +41,30 @@ interface Counters {
   rawCount: number;
 }
 
+/** Node types that anchor a thumbnail (the imaged unit for a finding). */
+const FRAME_TYPES = new Set(["FRAME", "COMPONENT", "COMPONENT_SET"]);
+
+/** Nearest frame/component ancestor — the unit imaged for `--thumbnails`. */
+interface FrameAncestor {
+  id: string;
+  name: string;
+  box?: BoundingBox;
+}
+
+function boxOf(node: FigmaNode): BoundingBox | undefined {
+  const b = node.absoluteBoundingBox;
+  if (
+    b &&
+    typeof b.x === "number" &&
+    typeof b.y === "number" &&
+    typeof b.width === "number" &&
+    typeof b.height === "number"
+  ) {
+    return { x: b.x, y: b.y, width: b.width, height: b.height };
+  }
+  return undefined;
+}
+
 function adoption(instanceCount: number, rawCount: number): number {
   const denom = instanceCount + rawCount;
   if (denom === 0) return 0;
@@ -56,6 +81,7 @@ function runRules(
     nodePath: string;
     library: LibraryIndex;
     config: AuditConfig;
+    frame?: FrameAncestor;
   },
   out: Finding[],
 ): void {
@@ -74,6 +100,10 @@ function runRules(
       severity: cfg.severity,
       message,
       figmaDeepLink: deepLink(ctx.fileKey, node.id),
+      nodeBox: boxOf(node),
+      frameId: ctx.frame?.id,
+      frameName: ctx.frame?.name,
+      frameBox: ctx.frame?.box,
     });
   };
 
@@ -117,6 +147,7 @@ export function analyzeFile(
     page: string,
     ancestors: string[],
     pageCounters: Counters,
+    frame: FrameAncestor | undefined,
   ): void => {
     const nodePath = [...ancestors, node.name].filter(Boolean).join(" / ");
 
@@ -131,14 +162,22 @@ export function analyzeFile(
       }
       runRules(
         node,
-        { fileKey, fileName, page, nodePath, library, config },
+        { fileKey, fileName, page, nodePath, library, config, frame },
         findings,
       );
     }
 
+    // The nearest frame/component ancestor anchors thumbnails: image the parent
+    // frame once and overlay all its findings (issue #3 — don't image leaves).
+    const nextFrame =
+      FRAME_TYPES.has(node.type) && boxOf(node)
+        ? { id: node.id, name: node.name, box: boxOf(node) }
+        : frame;
+
     if (Array.isArray(node.children)) {
+      const nextAncestors = [...ancestors, node.name].filter(Boolean);
       for (const child of node.children) {
-        walk(child, page, [...ancestors, node.name].filter(Boolean), pageCounters);
+        walk(child, page, nextAncestors, pageCounters, nextFrame);
       }
     }
   };
@@ -150,7 +189,7 @@ export function analyzeFile(
   for (const pageNode of topChildren) {
     const pageCounters: Counters = { instanceCount: 0, rawCount: 0 };
     for (const child of pageNode.children ?? []) {
-      walk(child, pageNode.name, [], pageCounters);
+      walk(child, pageNode.name, [], pageCounters, undefined);
     }
     pages.push({
       name: pageNode.name,

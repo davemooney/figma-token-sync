@@ -13,6 +13,9 @@ export interface FigmaNode {
   type: string;
   children?: FigmaNode[];
 
+  /** Absolute bounding box (page coordinate space), present on rendered nodes. */
+  absoluteBoundingBox?: BoundingBox;
+
   /** Present on INSTANCE nodes — points at the main component. */
   componentId?: string;
 
@@ -28,6 +31,14 @@ export interface FigmaNode {
 
   // Allow unknown extra fields without losing type-safety on the known ones.
   [key: string]: unknown;
+}
+
+/** Axis-aligned rectangle in Figma's absolute (page) coordinate space. */
+export interface BoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
 }
 
 export interface FigmaPaint {
@@ -87,6 +98,52 @@ export interface Finding {
   severity: Severity;
   message: string;
   figmaDeepLink: string;
+
+  /**
+   * Absolute bounding box of the flagged node (when Figma exposed one). Used by
+   * the `--thumbnails` overlay to outline the node in place over its frame.
+   */
+  nodeBox?: BoundingBox;
+  /** Nearest FRAME/COMPONENT/COMPONENT_SET ancestor of the flagged node. */
+  frameId?: string;
+  frameName?: string;
+  frameBox?: BoundingBox;
+}
+
+/**
+ * A frame imaged via `/v1/images` for the `--thumbnails` surfaces. The rendered
+ * export is inlined (SVG markup or a PNG `data:` URI) so the report stays
+ * self-contained. `overlays` are the flagged-node rects normalised to the
+ * frame's own origin/scale.
+ */
+export interface FrameThumbnail {
+  fileKey: string;
+  fileName: string;
+  page: string;
+  frameId: string;
+  frameName: string;
+  /** Frame box in absolute coords (the export's own bounds). */
+  frameBox: BoundingBox;
+  /** Inlined image: either raw SVG markup or a `data:` URI for PNG. */
+  image: { kind: "svg"; markup: string } | { kind: "png"; dataUri: string };
+  /** Pixel scale the image was rendered at (1 unless `--thumb-scale`). */
+  scale: number;
+  /** Frame-level adoption %, for the gallery's adoption ring. */
+  adoptionPct: number;
+  /** Flag breakdown for this frame, keyed by rule. */
+  flagCounts: Partial<Record<RuleId, number>>;
+  /** Findings belonging to this frame, with overlay rects. */
+  overlays: ThumbnailOverlay[];
+}
+
+/** One outlined flagged node within a frame thumbnail. */
+export interface ThumbnailOverlay {
+  nodeId: string;
+  rule: RuleId;
+  severity: Severity;
+  message: string;
+  /** Rect relative to the frame origin, in the image's pixel space. */
+  rect: BoundingBox;
 }
 
 /** Per-file adoption + finding rollup. */
@@ -122,6 +179,12 @@ export interface AuditResult {
   countsByRule: Record<RuleId, number>;
   countsBySeverity: Record<Severity, number>;
   libraryComponentCount: number;
+  /**
+   * Inlined frame thumbnails (only populated when `--thumbnails` ran). The HTML
+   * reporter renders the gallery + inline-preview surfaces from these. Absent /
+   * empty → the report is byte-identical to the text-only build.
+   */
+  frameThumbnails?: FrameThumbnail[];
 }
 
 /** Build a Figma deep-link to a node. */
