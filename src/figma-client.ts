@@ -6,7 +6,7 @@
  * keeps bursty CI runs from tripping 429s.
  */
 
-const FIGMA_API_BASE = "https://api.figma.com/v1";
+export const FIGMA_API_BASE = "https://api.figma.com/v1";
 
 export interface FigmaVariable {
   id: string;
@@ -90,6 +90,53 @@ export class FigmaClient {
     this.token = opts.token;
     this.limiter = new RateLimiter(opts.requestsPerMinute ?? 60);
     this.fetchImpl = opts.fetchImpl ?? fetch;
+  }
+
+  /**
+   * Rate-limited, retrying GET against an arbitrary Figma REST path.
+   *
+   * Honours the shared token bucket, then retries on 429 / 5xx with
+   * exponential backoff (respecting `Retry-After` when present). Used by the
+   * bulk audit fetcher, which hits hundreds of files and *will* trip 429s
+   * without this. Additive — the token-sync commands don't use it.
+   */
+  async getJSON<T>(
+    path: string,
+    opts: { maxRetries?: number; baseDelayMs?: number } = {},
+  ): Promise<T> {
+    const maxRetries = opts.maxRetries ?? 5;
+    const baseDelayMs = opts.baseDelayMs ?? 500;
+    const url = path.startsWith("http")
+      ? path
+      : `${FIGMA_API_BASE}${path.startsWith("/") ? "" : "/"}${path}`;
+
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      await this.limiter.take();
+      const res = await this.fetchImpl(url, {
+        headers: { "X-Figma-Token": this.token },
+      });
+
+      if (res.ok) return (await res.json()) as T;
+
+      const retryable = res.status === 429 || res.status >= 500;
+      if (retryable && attempt < maxRetries) {
+        const retryAfter = Number(res.headers.get("retry-after"));
+        const backoff =
+          Number.isFinite(retryAfter) && retryAfter > 0
+            ? retryAfter * 1000
+            : baseDelayMs * 2 ** attempt + Math.floor(Math.random() * 200);
+        await new Promise((r) => setTimeout(r, backoff));
+        attempt += 1;
+        continue;
+      }
+
+      const body = await res.text().catch(() => "");
+      throw new Error(
+        `Figma API error ${res.status} for ${url}: ${body || res.statusText}`,
+      );
+    }
   }
 
   /** Fetch the local Variables for a Figma file. */

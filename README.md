@@ -88,6 +88,100 @@ $ figma-token-sync diff
 
 Sample outputs live in [`examples/`](./examples).
 
+## Audit
+
+Beyond token drift, `figma-token-sync audit` scans **hundreds of Figma files**
+through the live REST API for **component-adoption** problems and emits a
+**single self-contained HTML report** (inline CSS/JS — opens straight from
+disk, no build step) that doubles as a design-system-governance artifact.
+
+```bash
+figma-token-sync audit \
+  --files file-keys.txt \          # one Figma file key per line (# comments ok)
+  --token "$FIGMA_TOKEN" \
+  --out report.html                # default audit-report.html
+```
+
+### What it detects (5 signals)
+
+| # | Signal | What it flags | Reliability |
+|---|--------|---------------|-------------|
+| 1 | **Adoption %** | `INSTANCE` coverage vs. raw `RECTANGLE`/`FRAME`/`VECTOR`/`TEXT` geometry, per page / file / portfolio | **reliable** |
+| 2 | **Unbound values** | a fill / stroke / effect with a literal value and **no** matching `boundVariables` entry = off-token | **reliable** |
+| 3 | **Ad-hoc text** | text nodes with no `styles.text` (typography not using a shared text style) | **reliable** |
+| 4 | **Library index + match** | builds a published-component index (`/components` + `/component_sets`) first, then flags **instances of local (non-library) components** and **local components that duplicate a library component by name** | **reliable** (local-vs-library) / **heuristic** (name-dup) |
+| 5 | **Detached candidates** | frames whose name + structure match a known component | **heuristic — candidates for review** |
+
+> **Honest framing.** The REST API has **no `wasInstance` flag**, so a detached
+> instance just looks like a frame. Signal 5 (and the name-based duplicate
+> match in signal 4) are therefore **best-effort heuristics**, surfaced in a
+> clearly-labelled "candidates for human review" section — the report **flags
+> candidates**, it does not claim perfect detection.
+
+### The report
+
+A dark, [SIGNAL](https://ultramoon.agency)-styled (Switzer + JetBrains Mono)
+HTML page with:
+
+- **exec-summary scorecards** — portfolio adoption %, unbound values, ad-hoc
+  text, total findings by severity;
+- a **severity heatmap** by rule (reliable vs. heuristic tagged);
+- **top offending files**;
+- a **client-side sortable / filterable / paginated findings table** (stays
+  fast across thousands of rows) with working **Figma deep-links**;
+- a **per-file drill-down** with per-page adoption.
+
+See the committed sample: [`examples/sample-audit-report.html`](./examples/sample-audit-report.html)
+(7 files, 39.9% adoption, 205 findings — generated from fixtures via
+`npm run sample-report`, no token needed).
+
+### Flags
+
+| Flag | Default | What |
+|------|---------|------|
+| `--files <path>` | — | text file of Figma file keys (one per line) |
+| `--team <id>` | — | enumerate a team's files instead of / alongside `--files` |
+| `--library <keys>` | all audited files | comma-separated file keys that publish the component library |
+| `--out <path>` | `audit-report.html` | report output path |
+| `--format <html\|json>` | `html` | `json` emits the same findings machine-readably |
+| `--config <path>` | — | audit config JSON (per-rule enable/severity + `ignore` list) |
+| `--rpm <n>` | `60` | Figma request budget |
+| `--concurrency <n>` | `4` | parallel file fetches |
+| `--cache-dir <path>` | `.figma-audit-cache` | on-disk response cache (keyed by file `version`) |
+| `--no-cache` | — | disable the version cache |
+| `--fail-under <pct>` | — | **CI gate** — exit non-zero if portfolio adoption % is below this |
+| `--max-unbound <n>` | — | **CI gate** — exit non-zero if unbound-value findings exceed this |
+| `--thumbnails` | *(stub)* | embed frame visuals via `GET /v1/images` — **not yet implemented**; flagged for a follow-up |
+
+The fetch layer is concurrency-capped, backs off exponentially on `429`/`5xx`
+(honouring `Retry-After`), and caches each file's payload keyed by its Figma
+`version`, so an edit-free re-run across hundreds of files costs one cheap
+metadata request per file instead of a full tree download.
+
+### Audit config
+
+```jsonc
+// audit.config.json
+{
+  "rules": {
+    "detached-candidate": { "enabled": false },
+    "unbound-value": { "severity": "error" }
+  },
+  "ignore": ["1:23", "WIP*", "Sandbox / *"]
+}
+```
+
+`ignore` entries match a node by exact id, exact name, or a `*`/`?` glob over
+its name and slash-joined path.
+
+### Audit CI recipe
+
+```yaml
+- run: npx figma-token-sync audit --files file-keys.txt --fail-under 70 --max-unbound 50
+  env:
+    FIGMA_TOKEN: ${{ secrets.FIGMA_TOKEN }}
+```
+
 ## CI recipe
 
 ```yaml

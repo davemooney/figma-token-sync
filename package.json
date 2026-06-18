@@ -14,6 +14,8 @@
   ],
   "scripts": {
     "build": "tsc",
+    "test": "npm run build && node scripts/copy-fixtures.mjs && node --test dist/audit/audit.test.js",
+    "sample-report": "npm run build && node scripts/gen-sample-report.mjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
